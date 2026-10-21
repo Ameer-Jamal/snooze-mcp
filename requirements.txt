@@ -1,0 +1,2 @@
+# Source checkout compatibility; package metadata is authoritative.
+-e .

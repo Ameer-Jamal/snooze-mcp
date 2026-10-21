@@ -1,0 +1,57 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "snooze-mcp"
+version = "0.1.0"
+description = "Durable local scheduling for MCP agents. Check external work without idle model calls."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Ameer Jamal" }]
+keywords = ["mcp", "scheduler", "codex", "automation", "agents"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "Operating System :: MacOS",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: System :: Monitoring",
+]
+dependencies = ["mcp>=1.30,<2"]
+
+[project.optional-dependencies]
+dev = ["build>=1.2,<2", "ruff>=0.12,<1", "coverage>=7.6,<8", "twine>=6,<7"]
+
+[project.urls]
+Homepage = "https://github.com/Ameer-Jamal/snooze-mcp"
+Documentation = "https://github.com/Ameer-Jamal/snooze-mcp/tree/main/docs"
+Issues = "https://github.com/Ameer-Jamal/snooze-mcp/issues"
+Changelog = "https://github.com/Ameer-Jamal/snooze-mcp/blob/main/CHANGELOG.md"
+
+[project.scripts]
+snooze-mcp = "snooze_mcp.cli:main"
+snooze-service = "snooze_mcp.service:main"
+snooze-demo = "snooze_mcp.demo:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I", "UP", "B"]
+
+[tool.coverage.run]
+source = ["snooze_mcp"]
+omit = ["*/__main__.py"]
+
+[tool.coverage.report]
+show_missing = true
