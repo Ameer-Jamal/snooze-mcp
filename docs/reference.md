@@ -9,6 +9,7 @@ Stored timestamps are Unix seconds. Use absolute paths where specified.
 | `get_job` | Full specification, continuation, and status by `job_id` |
 | `cancel_job` | Cancel an active check by `job_id` |
 | `read_events` | Paginated events and delivery results, newest first |
+| `retry_delivery` | Re-attempt a `failed` or `unknown` delivery by integer `event_id` |
 | `scheduler_health` | Inspect worker lock and heartbeat |
 
 Listings accept `limit` (1–100, default 50) and `offset` (nonnegative, default 0).
@@ -34,6 +35,16 @@ Timing values other than probe timeouts cannot exceed 31,536,000 seconds. Comman
 arrays allow at most 128 arguments and 65,536 total characters. No implicit shell
 is used. Schedule status probes, not commands that repeat the actual work.
 
+If no worker is running, the returned job includes a `warning` field; the check
+will not run until a worker starts.
+
+## retry_delivery
+
+Explicit, single attempt, only for events whose `delivery` is `failed` or `unknown`
+and whose job has a `thread_id`. Other states are refused. An `unknown` event may
+already have woken the agent, so retrying can **run it twice**; inspect the chat
+first. Nothing retries automatically.
+
 ## CLI
 
 ```sh
@@ -47,6 +58,7 @@ snooze-mcp get JOB_UUID
 snooze-mcp events --limit 20 --offset 0
 snooze-mcp cancel JOB_UUID
 snooze-mcp health
+snooze-mcp retry-delivery EVENT_ID   # failed/unknown only
 snooze-mcp --state /absolute/path/to/state worker
 ```
 
@@ -68,7 +80,27 @@ snooze-demo --wake-current-chat  # opts into one Codex wake
 | --- | --- |
 | `SNOOZE_STATE` | Alternate durable state directory |
 | `SNOOZE_CODEX` | Codex executable override; use an absolute path |
+| `SNOOZE_DELIVERY_COMMAND` | Delivery argv template replacing `codex queue`; see below |
 | `CODEX_THREAD_ID` | Calling chat UUID used by the wake demo |
 
-The macOS installer captures PATH, state path, and an explicit Codex override.
-Reinstall the worker if those paths change.
+The macOS installer captures PATH, state path, `SNOOZE_CODEX`, and
+`SNOOZE_DELIVERY_COMMAND`. Reinstall the worker if those change.
+
+### Custom delivery
+
+When `SNOOZE_DELIVERY_COMMAND` is set and nonblank it replaces the Codex adapter,
+so other agents can be woken:
+
+```sh
+export SNOOZE_DELIVERY_COMMAND='/abs/path/agent-wake --session {thread} --message {message}'
+```
+
+The template is split with shell-style quoting (`shlex`) but never run by a shell.
+`{thread}` and `{message}` are replaced inside their argument after splitting, in
+one pass: the message stays one argument whatever it contains and is never
+re-expanded. The executable (first word) cannot contain placeholders. Exit 0 is
+`queued`; nonzero, a bad template, or a start failure is `failed`; timeout (30s) or
+output over 1 MiB is `unknown`. Each event still gets one automatic attempt.
+
+The worker sleeps until the earliest job is due, between 0.1 and 5 seconds, so jobs
+added by other processes are noticed within 5 seconds.

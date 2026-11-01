@@ -8,7 +8,10 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from snooze_mcp.core import Scheduler, run_command
+from snooze_mcp.core import MAX_SLEEP, MIN_SLEEP, Scheduler, delivery_argv, run_command
+from snooze_mcp.server import with_worker_warning
+
+THREAD = "00000000-0000-0000-0000-000000000001"
 
 
 class SchedulerTests(unittest.TestCase):
@@ -218,6 +221,155 @@ class SchedulerTests(unittest.TestCase):
             wake.assert_not_called()
         self.assertEqual(self.scheduler.events()[0]["delivery"], "unknown")
 
+    def deliver_with(self, **env):
+        self.add(thread_id=THREAD)
+        with (
+            patch.dict(os.environ, env),
+            patch("snooze_mcp.core.run_command", return_value=(0, "ok")) as wake,
+        ):
+            self.scheduler.tick()
+        return wake
+
+    def test_custom_delivery_command_replaces_codex(self):
+        wake = self.deliver_with(SNOOZE_DELIVERY_COMMAND="/bin/agent --to {thread} -m {message}")
+        argv = wake.call_args.args[0]
+        self.assertEqual(argv[:3], ["/bin/agent", "--to", THREAD])
+        self.assertEqual(argv[3], "-m")
+        self.assertIn("Snooze scheduler: test [completed]", argv[4])
+        self.assertEqual(len(argv), 5)
+        self.assertEqual(self.scheduler.events()[0]["delivery"], "queued")
+
+    def test_blank_delivery_command_uses_codex(self):
+        wake = self.deliver_with(SNOOZE_DELIVERY_COMMAND="  ", SNOOZE_CODEX="/x/codex")
+        self.assertEqual(wake.call_args.args[0][:2], ["/x/codex", "queue"])
+
+    def test_placeholders_cannot_inject_arguments_or_expand_twice(self):
+        message = "a b; rm -rf / {thread} $(x) 'q' {message}"
+        argv = delivery_argv("/bin/agent {thread} --msg={message} '{message}'", THREAD, message)
+        self.assertEqual(argv, ["/bin/agent", THREAD, f"--msg={message}", message])
+
+    def test_invalid_delivery_templates_are_rejected(self):
+        for template in ("", "   ", "{message} {thread}", "'unterminated"):
+            with self.subTest(template=template), self.assertRaises(ValueError):
+                delivery_argv(template, THREAD, "m")
+
+    def test_bad_delivery_template_is_failed_without_a_process(self):
+        for template in ("'unterminated", "{message}"):
+            with self.subTest(template=template):
+                self.add(thread_id=THREAD)
+                wake = self.deliver_with(SNOOZE_DELIVERY_COMMAND=template)
+                wake.assert_not_called()
+        self.assertEqual({e["delivery"] for e in self.scheduler.events()}, {"failed"})
+
+    def test_custom_delivery_failure_and_timeout_states(self):
+        for outcome, state in (((1, "no"), "failed"), (TimeoutError("late"), "unknown")):
+            self.add(thread_id=THREAD)
+            mock = {"side_effect": outcome}
+            with (
+                patch.dict(os.environ, {"SNOOZE_DELIVERY_COMMAND": "/bin/agent {message}"}),
+                patch("snooze_mcp.core.run_command", **mock) as wake,
+            ):
+                self.scheduler.tick()
+                self.scheduler.tick()
+                self.assertEqual(wake.call_count, 1)
+            self.assertEqual(self.scheduler.events()[0]["delivery"], state)
+
+    def event_with(self, delivery, thread_id=THREAD):
+        self.add(thread_id=thread_id)
+        with patch.object(self.scheduler, "deliver"):
+            self.scheduler.tick()
+        event_id = self.scheduler.events()[0]["id"]
+        with self.scheduler.db() as db:
+            db.execute("UPDATE events SET delivery=? WHERE id=?", (delivery, event_id))
+        return event_id
+
+    def test_retry_failed_and_unknown_deliveries(self):
+        for state in ("failed", "unknown"):
+            event_id = self.event_with(state)
+            with patch("snooze_mcp.core.run_command", return_value=(0, "ok")) as wake:
+                result = self.scheduler.retry_delivery(event_id)
+            self.assertEqual(wake.call_count, 1)
+            self.assertEqual(result["delivery"], "queued")
+            self.assertEqual(result["delivery_detail"], "ok")
+
+    def test_retry_that_fails_again_stays_failed_and_is_single_attempt(self):
+        event_id = self.event_with("failed")
+        with patch("snooze_mcp.core.run_command", return_value=(1, "still down")) as wake:
+            self.assertEqual(self.scheduler.retry_delivery(event_id)["delivery"], "failed")
+            self.scheduler.tick()
+            self.assertEqual(wake.call_count, 1)
+
+    def test_retry_timeout_becomes_unknown(self):
+        event_id = self.event_with("failed")
+        with patch("snooze_mcp.core.run_command", side_effect=TimeoutError("late")):
+            self.assertEqual(self.scheduler.retry_delivery(event_id)["delivery"], "unknown")
+
+    def test_retry_is_refused_for_other_states_and_bad_ids(self):
+        for state in ("queued", "pending", "sending", "inbox"):
+            event_id = self.event_with(state)
+            with (
+                patch("snooze_mcp.core.run_command") as wake,
+                self.assertRaises(ValueError),
+            ):
+                self.scheduler.retry_delivery(event_id)
+            wake.assert_not_called()
+            self.assertEqual(self.scheduler.events()[0]["delivery"], state)
+        for bad in (9999, "1", True, None):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                self.scheduler.retry_delivery(bad)
+
+    def test_retry_is_refused_without_a_thread(self):
+        event_id = self.event_with("failed", thread_id=None)
+        with patch("snooze_mcp.core.run_command") as wake, self.assertRaises(ValueError):
+            self.scheduler.retry_delivery(event_id)
+        wake.assert_not_called()
+
+    def test_concurrent_retry_claims_once(self):
+        event_id = self.event_with("failed")
+        with self.scheduler.db() as db:
+            db.execute("UPDATE events SET delivery='sending' WHERE id=?", (event_id,))
+        self.assertFalse(self.scheduler._send(event_id, "failed"))
+
+    def test_sleep_targets_earliest_job_with_bounds(self):
+        now = time.time()
+        self.assertEqual(self.scheduler.sleep_seconds(now), MAX_SLEEP)
+        self.scheduler.schedule("far", delay_seconds=3600, cwd=self.temp.name)
+        self.assertEqual(self.scheduler.sleep_seconds(), MAX_SLEEP)
+        self.scheduler.schedule("soon", delay_seconds=2, cwd=self.temp.name)
+        self.assertTrue(MIN_SLEEP < self.scheduler.sleep_seconds() <= 2)
+        self.scheduler.schedule("due", delay_seconds=0, cwd=self.temp.name)
+        self.assertEqual(self.scheduler.sleep_seconds(now + 10), MIN_SLEEP)
+
+    def test_sleep_considers_expiry(self):
+        self.scheduler.schedule(
+            "expiring",
+            delay_seconds=0,
+            interval_seconds=3000,
+            expires_in_seconds=2,
+            cwd=self.temp.name,
+        )
+        with self.scheduler.db() as db:
+            db.execute("UPDATE jobs SET next_at=next_at+3000")
+        self.assertTrue(self.scheduler.sleep_seconds() <= 2)
+
+    def test_worker_sleeps_using_computed_delay(self):
+        with (
+            patch.object(self.scheduler, "sleep_seconds", return_value=0.25),
+            patch("snooze_mcp.core.time.sleep", side_effect=KeyboardInterrupt) as nap,
+            self.assertRaises(KeyboardInterrupt),
+        ):
+            self.scheduler.worker()
+        nap.assert_called_once_with(0.25)
+
+    def test_schedule_warns_when_worker_is_not_running(self):
+        job = with_worker_warning(self.scheduler, self.add())
+        self.assertIn("Worker is not running", job["warning"])
+
+    def test_schedule_has_no_warning_when_worker_is_running(self):
+        job = self.add()
+        with patch.object(self.scheduler, "health", return_value={"worker_running": True}):
+            self.assertNotIn("warning", with_worker_warning(self.scheduler, job))
+
     def test_database_is_private(self):
         self.assertEqual((Path(self.temp.name) / "snooze.db").stat().st_mode & 0o777, 0o600)
 
@@ -252,10 +404,14 @@ class SchedulerTests(unittest.TestCase):
                     await session.initialize()
                     names = {tool.name for tool in (await session.list_tools()).tools}
                     self.assertIn("schedule_check", names)
+                    self.assertIn("retry_delivery", names)
                     result = await session.call_tool(
                         "schedule_check", {"title": "MCP smoke", "delay_seconds": 0}
                     )
                     self.assertFalse(result.isError, result)
+                    self.assertIn("warning", result.content[0].text)
+                    refused = await session.call_tool("retry_delivery", {"event_id": 999})
+                    self.assertTrue(refused.isError)
                     self.scheduler.worker(once=True)
                     events = await session.call_tool("read_events", {})
                     self.assertFalse(events.isError)

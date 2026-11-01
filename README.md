@@ -140,7 +140,10 @@ Agent ── schedule_check ──▶ SQLite ◀── local worker
 
 Jobs finish once. Terminal events are saved before delivery. Each wake gets
 **one attempt**; there are no automatic retries that could duplicate AI work.
-If delivery fails or is unknown, inspect the event and chat before retrying.
+If delivery fails or is unknown, inspect the event and chat, then retry explicitly
+with `snooze-mcp retry-delivery EVENT_ID`; retrying `unknown` can duplicate a run.
+Set `SNOOZE_DELIVERY_COMMAND` to wake a non-Codex agent
+([custom delivery](docs/reference.md#custom-delivery)).
 [Delivery semantics](docs/architecture.md#delivery).
 
 ## Operational boundaries

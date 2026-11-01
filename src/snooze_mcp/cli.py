@@ -26,6 +26,8 @@ def main():
     get = subs.add_parser("get")
     get.add_argument("job_id")
     subs.add_parser("health")
+    retry = subs.add_parser("retry-delivery", help="re-attempt a failed or unknown delivery")
+    retry.add_argument("event_id", type=int)
     add = subs.add_parser("add")
     add.add_argument("json", help="JSON arguments for schedule")
     cancel = subs.add_parser("cancel")
@@ -45,6 +47,8 @@ def main():
                 result = scheduler.schedule(**arguments)
             elif args.action in ("cancel", "get"):
                 result = getattr(scheduler, args.action)(args.job_id)
+            elif args.action == "retry-delivery":
+                result = scheduler.retry_delivery(args.event_id)
             elif args.action in ("jobs", "events"):
                 result = getattr(scheduler, args.action)(args.limit, args.offset)
             else:

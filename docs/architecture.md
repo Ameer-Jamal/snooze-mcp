@@ -36,6 +36,8 @@ may run again after restart, so probes must be repeatable.
 No `thread_id` means inbox-only results. With an exact accessible local Codex chat
 UUID, the adapter runs `codex queue --thread UUID --message SAVED_CONTINUATION_AND_RESULT`.
 `SNOOZE_CODEX` can select an absolute executable; otherwise the worker uses PATH.
+`SNOOZE_DELIVERY_COMMAND` replaces this adapter with an argv template
+([reference](reference.md#custom-delivery)).
 The local app-server must be available. Codex controls the chat's model and permissions.
 
 | Delivery | Meaning |
