@@ -56,3 +56,44 @@ class ServiceTests(unittest.TestCase):
             ):
                 service.main()
             self.assertEqual(plist.read_text(), "existing")
+
+
+class BuildPlistTests(unittest.TestCase):
+    def test_plist_content_is_absolute_and_serializable(self):
+        state = Path("/abs/state")
+        config = service.build_plist("/abs/python", state, {"PATH": "/a:/b"})
+        self.assertEqual(config["Label"], service.LABEL)
+        self.assertEqual(config["ProgramArguments"], ["/abs/python", "-m", "snooze_mcp", "worker"])
+        self.assertEqual(config["WorkingDirectory"], "/abs/state")
+        self.assertEqual(config["StandardOutPath"], "/abs/state/worker.log")
+        self.assertEqual(config["StandardErrorPath"], "/abs/state/worker-error.log")
+        self.assertTrue(config["RunAtLoad"] and config["KeepAlive"])
+        self.assertEqual(
+            config["EnvironmentVariables"], {"PATH": "/a:/b", "SNOOZE_STATE": "/abs/state"}
+        )
+        self.assertEqual(plistlib.loads(plistlib.dumps(config)), config)
+
+    def test_plist_carries_delivery_settings_only_when_set(self):
+        env = {"SNOOZE_CODEX": "/c", "SNOOZE_DELIVERY_COMMAND": "/bin/agent {thread} {message}"}
+        config = service.build_plist("/p", Path("/s"), {**env, "OTHER": "no"})
+        self.assertEqual(
+            config["EnvironmentVariables"],
+            {"PATH": "/usr/bin:/bin", "SNOOZE_STATE": "/s", **env},
+        )
+
+    def test_default_plist_location_is_user_launch_agents(self):
+        self.assertEqual(service.PLIST.parent, Path.home() / "Library/LaunchAgents")
+
+    def test_uninstall_unloads_and_removes_without_touching_state(self):
+        with tempfile.TemporaryDirectory() as directory:
+            plist = Path(directory) / "test.plist"
+            plist.write_text("x")
+            with (
+                patch.object(service, "PLIST", plist),
+                patch.object(service.sys, "platform", "darwin"),
+                patch.object(service.sys, "argv", ["snooze-service", "uninstall"]),
+                patch.object(service.subprocess, "run") as run,
+            ):
+                service.main()
+            self.assertFalse(plist.exists())
+            self.assertEqual(run.call_args.args[0][:2], ["launchctl", "bootout"])

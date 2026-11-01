@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- `SNOOZE_DELIVERY_COMMAND`: configurable delivery argv template with `{thread}` and
+  `{message}` placeholders (no shell), replacing the Codex default.
+- `retry_delivery` (core, `snooze-mcp retry-delivery`, MCP tool) for failed/unknown events.
+  Per-event OS locks coordinate retry attempts with worker startup recovery.
+- `snooze-service` plist generation is a pure function and preserves the delivery setting.
+- Worker sleeps until the next due job (0.1-5s) instead of a fixed second.
+- `schedule_check` warns when no worker is running.
+
 ## 0.1.0 — 2026-10-21
 
 Initial public prerelease.

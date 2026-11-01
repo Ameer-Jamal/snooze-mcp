@@ -3,6 +3,15 @@
 from .core import Scheduler
 
 
+def with_worker_warning(scheduler: Scheduler, job: dict) -> dict:
+    """Add a warning to a scheduled job when no worker is running to run it."""
+    if not scheduler.health()["worker_running"]:
+        job["warning"] = (
+            "Worker is not running; this check will not run or wake anything until it starts."
+        )
+    return job
+
+
 def serve(scheduler: Scheduler):
     from mcp.server.fastmcp import FastMCP
 
@@ -39,7 +48,7 @@ def serve(scheduler: Scheduler):
         Pending checks back off from interval up to max_interval; default is fixed interval.
         expires_in_seconds bounds the wait. Choose an interval matching expected runtime.
         """
-        return scheduler.schedule(
+        job = scheduler.schedule(
             title=title,
             kind=kind,
             delay_seconds=delay_seconds,
@@ -53,6 +62,7 @@ def serve(scheduler: Scheduler):
             thread_id=thread_id,
             instruction=instruction,
         )
+        return with_worker_warning(scheduler, job)
 
     @mcp.tool()
     def list_jobs(limit: int = 50, offset: int = 0) -> list[dict]:
@@ -73,6 +83,11 @@ def serve(scheduler: Scheduler):
     def read_events(limit: int = 50, offset: int = 0) -> list[dict]:
         """Read paginated events, newest first; limit 1–100. Does not acknowledge events."""
         return scheduler.events(limit, offset)
+
+    @mcp.tool()
+    def retry_delivery(event_id: int) -> dict:
+        """Retry a failed or unknown wake once. Unknown may already have woken the agent: check first."""
+        return scheduler.retry_delivery(event_id)
 
     @mcp.tool()
     def scheduler_health() -> dict:

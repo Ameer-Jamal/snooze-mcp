@@ -25,6 +25,10 @@ Inspect `snooze-mcp events` and `snooze-mcp get JOB_UUID`:
 - `failed`: inspect `delivery_detail`, executable path, CLI support, and UUID.
 - `unknown`: acceptance is uncertain; check the chat before retrying manually.
 
+After fixing the cause, run `snooze-mcp retry-delivery EVENT_ID` (or the
+`retry_delivery` tool). Only `failed` and `unknown` events qualify. Retrying
+`unknown` can run the agent twice.
+
 Verify `codex queue --help`. The target must be a locally accessible chat. Use its
 exact UUID. The worker captures PATH when installed; set an absolute `SNOOZE_CODEX`
 and reinstall the macOS service if Codex moved. Version-manager executables may

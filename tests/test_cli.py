@@ -67,6 +67,15 @@ class CLITests(unittest.TestCase):
             worker.wait(timeout=5)
             worker.stderr.close()
 
+    def test_retry_delivery_guards(self):
+        added = self.run_cli("add", '{"title":"CLI retry","delay_seconds":0}')
+        self.assertEqual(added.returncode, 0, added.stderr)
+        self.run_cli("worker", "--once")
+        for event_id in ("1", "99", "x"):
+            result = self.run_cli("retry-delivery", event_id)
+            self.assertEqual(result.returncode, 2)
+            self.assertNotIn("Traceback", result.stderr)
+
     def test_environment_selects_state_directory(self):
         result = subprocess.run(
             [sys.executable, "-m", "snooze_mcp", "health"],

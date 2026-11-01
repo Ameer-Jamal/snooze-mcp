@@ -36,6 +36,8 @@ may run again after restart, so probes must be repeatable.
 No `thread_id` means inbox-only results. With an exact accessible local Codex chat
 UUID, the adapter runs `codex queue --thread UUID --message SAVED_CONTINUATION_AND_RESULT`.
 `SNOOZE_CODEX` can select an absolute executable; otherwise the worker uses PATH.
+`SNOOZE_DELIVERY_COMMAND` replaces this adapter with an argv template
+([reference](reference.md#custom-delivery)).
 The local app-server must be available. Codex controls the chat's model and permissions.
 
 | Delivery | Meaning |
@@ -46,6 +48,11 @@ The local app-server must be available. Codex controls the chat's model and perm
 | `queued` | Codex returned success; agent execution is not confirmed |
 | `failed` | Executable/start failure or nonzero CLI exit |
 | `unknown` | Timeout/output failure or restart during an attempt |
+
+Delivery attempts hold a per-event OS lock through command execution and the final
+state update. Worker startup changes `sending` to `unknown` only when that lock is
+free, so a live CLI/MCP retry keeps ownership. Lock files remain in place to avoid
+inode races; the OS releases a crashed process's lock.
 
 There is no automatic delivery retry. A crash after acceptance could otherwise
 duplicate AI work. Inspect the chat before manually requeuing. Cancellation cannot

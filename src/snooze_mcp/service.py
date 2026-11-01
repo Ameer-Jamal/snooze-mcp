@@ -14,6 +14,26 @@ PLIST = Path.home() / "Library/LaunchAgents" / f"{LABEL}.plist"
 DOMAIN = f"gui/{os.getuid()}"
 
 
+def build_plist(python: str, state: Path, env: dict) -> dict:
+    """Pure LaunchAgent definition; absolute paths only, nothing is read from or written to disk."""
+    passthrough = {k: env[k] for k in ("SNOOZE_CODEX", "SNOOZE_DELIVERY_COMMAND") if k in env}
+    return {
+        "Label": LABEL,
+        "ProgramArguments": [python, "-m", "snooze_mcp", "worker"],
+        "WorkingDirectory": str(state),
+        "RunAtLoad": True,
+        "KeepAlive": True,
+        "ThrottleInterval": 10,
+        "StandardOutPath": str(state / "worker.log"),
+        "StandardErrorPath": str(state / "worker-error.log"),
+        "EnvironmentVariables": {
+            "PATH": env.get("PATH", "/usr/bin:/bin"),
+            "SNOOZE_STATE": str(state),
+            **passthrough,
+        },
+    }
+
+
 def main():
     if sys.platform != "darwin":
         raise SystemExit(
@@ -33,23 +53,7 @@ def main():
         raise SystemExit(f"Already installed: {PLIST}. Uninstall before reinstalling.")
     DEFAULT_STATE.mkdir(parents=True, exist_ok=True, mode=0o700)
     PLIST.parent.mkdir(parents=True, exist_ok=True)
-    config = {
-        "Label": LABEL,
-        "ProgramArguments": [sys.executable, "-m", "snooze_mcp", "worker"],
-        "WorkingDirectory": str(DEFAULT_STATE.resolve()),
-        "RunAtLoad": True,
-        "KeepAlive": True,
-        "ThrottleInterval": 10,
-        "StandardOutPath": str(DEFAULT_STATE / "worker.log"),
-        "StandardErrorPath": str(DEFAULT_STATE / "worker-error.log"),
-        "EnvironmentVariables": {
-            "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
-            "SNOOZE_STATE": str(DEFAULT_STATE.resolve()),
-            **(
-                {"SNOOZE_CODEX": os.environ["SNOOZE_CODEX"]} if "SNOOZE_CODEX" in os.environ else {}
-            ),
-        },
-    }
+    config = build_plist(sys.executable, DEFAULT_STATE.resolve(), dict(os.environ))
     PLIST.write_bytes(plistlib.dumps(config))
     result = subprocess.run(["launchctl", "bootstrap", DOMAIN, str(PLIST)])
     if result.returncode:
