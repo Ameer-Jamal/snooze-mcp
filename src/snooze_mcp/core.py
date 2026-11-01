@@ -373,7 +373,31 @@ class Scheduler:
         with self.db() as db:
             return dict(db.execute("SELECT * FROM events WHERE id=?", (event_id,)).fetchone())
 
+    @contextlib.contextmanager
+    def delivery_lock(self, event_id):
+        """A per-event OS lock distinguishes live attempts from crashed processes.
+
+        Lock files stay in place: unlinking one could let concurrent clients lock
+        different inodes for the same event. The OS releases locks on process exit.
+        """
+        directory = self.state / "delivery-locks"
+        directory.mkdir(exist_ok=True, mode=0o700)
+        with (directory / f"{event_id}.lock").open("a") as lock:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                yield False
+            else:
+                yield True
+
     def _send(self, event_id, expected):
+        """Hold delivery ownership through the subprocess and final state update."""
+        with self.delivery_lock(event_id) as acquired:
+            if not acquired:
+                return False
+            return self._send_locked(event_id, expected)
+
+    def _send_locked(self, event_id, expected):
         """Claim an event atomically, then make at most one delivery attempt."""
         with self.db() as db:
             claimed = db.execute(
@@ -434,11 +458,18 @@ class Scheduler:
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:
                 raise SystemExit("A worker is already running") from None
-            # An interrupted queue operation has an unknown result; require inspection.
+            # A CLI/MCP retry can be alive independently of this worker. Recover
+            # only attempts whose owner has exited, keeping live claims intact.
             with self.db() as db:
-                db.execute(
-                    "UPDATE events SET delivery='unknown',delivery_detail='Worker interrupted during queue attempt; inspect chat before retrying' WHERE delivery='sending'"
-                )
+                sending = db.execute("SELECT id FROM events WHERE delivery='sending'").fetchall()
+            for event in sending:
+                with self.delivery_lock(event["id"]) as acquired:
+                    if acquired:
+                        with self.db() as db:
+                            db.execute(
+                                "UPDATE events SET delivery='unknown',delivery_detail='Delivery process interrupted; inspect chat before retrying' WHERE id=? AND delivery='sending'",
+                                (event["id"],),
+                            )
             while True:
                 self.tick()
                 if once:

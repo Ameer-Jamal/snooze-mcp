@@ -1,8 +1,11 @@
 import asyncio
 import json
 import os
+import selectors
+import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -329,6 +332,88 @@ class SchedulerTests(unittest.TestCase):
         with self.scheduler.db() as db:
             db.execute("UPDATE events SET delivery='sending' WHERE id=?", (event_id,))
         self.assertFalse(self.scheduler._send(event_id, "failed"))
+
+    def test_worker_startup_preserves_live_retry_and_refuses_second_attempt(self):
+        event_id = self.event_with("failed")
+        started, release = threading.Event(), threading.Event()
+        errors = []
+
+        def command(*args):
+            started.set()
+            if not release.wait(5):
+                raise TimeoutError("Test did not release delivery")
+            return 0, "accepted"
+
+        def retry():
+            try:
+                self.scheduler.retry_delivery(event_id)
+            except Exception as exc:
+                errors.append(exc)
+
+        with patch("snooze_mcp.core.run_command", side_effect=command) as wake:
+            thread = threading.Thread(target=retry)
+            thread.start()
+            try:
+                self.assertTrue(started.wait(5))
+                self.scheduler.worker(once=True)
+                self.assertEqual(self.scheduler.events()[0]["delivery"], "sending")
+                with self.assertRaises(ValueError):
+                    Scheduler(self.temp.name).retry_delivery(event_id)
+                self.assertEqual(wake.call_count, 1)
+            finally:
+                release.set()
+                thread.join(5)
+            self.assertFalse(thread.is_alive())
+        self.assertEqual(errors, [])
+        self.assertEqual(self.scheduler.events()[0]["delivery"], "queued")
+
+    def test_worker_recovers_crashed_retry_without_stealing_live_process_lock(self):
+        event_id = self.event_with("failed")
+        script = """
+import sys, time
+from snooze_mcp.core import Scheduler
+scheduler = Scheduler(sys.argv[1])
+event_id = int(sys.argv[2])
+with scheduler.delivery_lock(event_id) as acquired:
+    assert acquired
+    with scheduler.db() as db:
+        db.execute("UPDATE events SET delivery='sending' WHERE id=?", (event_id,))
+    print("ready", flush=True)
+    time.sleep(60)
+"""
+        with subprocess.Popen(
+            [sys.executable, "-u", "-c", script, self.temp.name, str(event_id)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        ) as process:
+            try:
+                with selectors.DefaultSelector() as selector:
+                    selector.register(process.stdout, selectors.EVENT_READ)
+                    self.assertTrue(selector.select(5), "Delivery child did not become ready")
+                self.assertEqual(process.stdout.readline().strip(), "ready")
+                self.scheduler.worker(once=True)
+                self.assertEqual(self.scheduler.events()[0]["delivery"], "sending")
+            finally:
+                process.kill()
+                process.wait(timeout=5)
+        with patch("snooze_mcp.core.run_command") as wake:
+            self.scheduler.worker(once=True)
+            wake.assert_not_called()
+        self.assertEqual(self.scheduler.events()[0]["delivery"], "unknown")
+
+    def test_delivery_lock_excludes_other_scheduler_instances(self):
+        event_id = self.event_with("failed")
+        other = Scheduler(self.temp.name)
+        with self.scheduler.delivery_lock(event_id) as acquired:
+            self.assertTrue(acquired)
+            with patch("snooze_mcp.core.run_command") as wake:
+                with self.assertRaises(ValueError):
+                    other.retry_delivery(event_id)
+                wake.assert_not_called()
+            self.assertEqual(other.events()[0]["delivery"], "failed")
+        with patch("snooze_mcp.core.run_command", return_value=(0, "ok")):
+            self.assertEqual(other.retry_delivery(event_id)["delivery"], "queued")
 
     def test_sleep_targets_earliest_job_with_bounds(self):
         now = time.time()

@@ -49,6 +49,11 @@ The local app-server must be available. Codex controls the chat's model and perm
 | `failed` | Executable/start failure or nonzero CLI exit |
 | `unknown` | Timeout/output failure or restart during an attempt |
 
+Delivery attempts hold a per-event OS lock through command execution and the final
+state update. Worker startup changes `sending` to `unknown` only when that lock is
+free, so a live CLI/MCP retry keeps ownership. Lock files remain in place to avoid
+inode races; the OS releases a crashed process's lock.
+
 There is no automatic delivery retry. A crash after acceptance could otherwise
 duplicate AI work. Inspect the chat before manually requeuing. Cancellation cannot
 retract terminal events or queued messages.
